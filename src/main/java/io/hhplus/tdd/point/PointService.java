@@ -58,6 +58,10 @@ public class PointService {
 
         long totalPoint = pointData.point() - amount;
 
+        if (totalPoint < 0) {
+            throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
+        }
+
         UserPoint balancePoints = userPointTable.insertOrUpdate(userId, totalPoint);
         pointHistoryTable.insert(userId, amount, TransactionType.USE, System.currentTimeMillis());
         return balancePoints;
