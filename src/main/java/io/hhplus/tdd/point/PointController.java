@@ -9,13 +9,13 @@ import java.util.List;
 @RestController
 @RequestMapping("/point")
 public class PointController {
+    private final PointFacade facade;
 
     private static final Logger log = LoggerFactory.getLogger(PointController.class);
 
-    private final PointService pointService;
 
-    public PointController(PointService pointService) {
-        this.pointService = pointService;
+    public PointController(PointFacade facade) {
+        this.facade = facade;
     }
 
     /**
@@ -25,7 +25,7 @@ public class PointController {
     public UserPoint point(
             @PathVariable long id
     ) {
-        return pointService.getPoint(id);
+        return facade.getPoint(id);
     }
 
     /**
@@ -35,7 +35,7 @@ public class PointController {
     public List<PointHistory> history(
             @PathVariable long id
     ) {
-        return pointService.getHistories(id);
+        return facade.getHistories(id);
     }
 
     /**
@@ -46,7 +46,7 @@ public class PointController {
             @PathVariable long id,
             @RequestBody long amount
     ) {
-        return pointService.charge(id, amount);
+        return facade.charge(id, amount);
     }
 
     /**
@@ -57,6 +57,6 @@ public class PointController {
             @PathVariable long id,
             @RequestBody long amount
     ) {
-        return pointService.use(id, amount);
+        return facade.use(id, amount);
     }
 }
