@@ -4,14 +4,20 @@ import io.hhplus.tdd.common.ApiException;
 import io.hhplus.tdd.common.ErrorCode;
 import io.hhplus.tdd.database.PointHistoryTable;
 import io.hhplus.tdd.database.UserPointTable;
+import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -151,27 +157,42 @@ class PointServiceTest {
     @Nested
     @DisplayName("오류/검증 케이스")
     class ErrorCases {
-        /**
-         * 케이스: 충전/사용 금액이 0 이하인 경우 예외가 발생해야 한다.
-         * 이유: 금액 검증 로직 - 유효하지 않은 값으로 데이터 무결성을 깨지 않도록 차단.
-         */
+        @ParameterizedTest
+        @ValueSource(longs = {0, -1})
+        @DisplayName("charge: 0 또는 음수 금액이면 INVALID_AMOUNT 예외, 상태 불변")
+        void charge_amountMustBePositive(long invalidAmount) {
+            long userId = 10L; // charge 전용 케이스
 
-        @Test
-        @DisplayName("금액 검증: charge/use 금액은 1 이상 (0/음수 거부)")
-        void amount_mustBePositive() {
-            long userId = 10L;
-
-            assertThatThrownBy(() -> service.charge(userId, 0))
-                    .isInstanceOf(IllegalArgumentException.class);
-
-            assertThatThrownBy(() -> service.use(userId, -1))
-                    .isInstanceOf(IllegalArgumentException.class);
-
+            assertThatThrownBy(() -> service.charge(userId, invalidAmount))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(ex -> {
+                        ApiException ae = (ApiException) ex;
+                        assertThat(ae.errorCode()).isEqualTo(ErrorCode.INVALID_AMOUNT);
+                    });
 
             // 부적절 요청 이후에도 상태는 변하지 않아야 함
             assertThat(service.getPoint(userId).point()).isZero();
             assertThat(service.getHistories(userId)).isEmpty();
         }
+
+        @ParameterizedTest
+        @ValueSource(longs = {0, -1})
+        @DisplayName("use: 0 또는 음수 금액이면 INVALID_AMOUNT 예외, 상태 불변")
+        void use_amountMustBePositive(long invalidAmount) {
+            long userId = 12L; // use 전용 케이스 (충돌 방지)
+
+            assertThatThrownBy(() -> service.use(userId, invalidAmount))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(ex -> {
+                        ApiException ae = (ApiException) ex;
+                        assertThat(ae.errorCode()).isEqualTo(ErrorCode.INVALID_AMOUNT);
+                    });
+
+            // 부적절 요청 이후에도 상태는 변하지 않아야 함
+            assertThat(service.getPoint(userId).point()).isZero();
+            assertThat(service.getHistories(userId)).isEmpty();
+        }
+
 
         /**
          * 케이스: 잔액 부족 시 사용 요청은 실패하고 상태는 불변이어야 한다. & 예외 처리 진행 여부에 대한 검증
@@ -202,5 +223,99 @@ class PointServiceTest {
 
     }
 
+    @Nested
+    @DisplayName("경계값 분석: use (잔액 100 기준)")
+    class UseBoundaryCases {
+
+        /**
+         * 사전 조건: userId=20L, 잔액 100 충전
+         * 검증 대상:
+         *  - amount = -1, 0  -> INVALID_AMOUNT
+         *  - amount = 1, 99, 100 -> OK
+         *  - amount = 101 -> INSUFFICIENT_BALANCE
+         */
+        static Stream<Arguments> useAmounts() {
+            return Stream.of(
+                    Arguments.of(-1L, "INVALID_AMOUNT"),
+                    Arguments.of(0L,  "INVALID_AMOUNT"),
+                    Arguments.of(1L,  "OK"),
+                    Arguments.of(99L, "OK"),
+                    Arguments.of(100L,"OK"),
+                    Arguments.of(101L,"INSUFFICIENT_BALANCE")
+            );
+        }
+
+        @ParameterizedTest(name = "use 금액={0} → 기대={1}")
+        @MethodSource("useAmounts")
+        void use_boundary(long amount, String expected) {
+            long userId = 20L;
+
+            // 잔액을 100으로 맞춤
+            service.charge(userId, 100);
+
+            if ("OK".equals(expected)) {
+                UserPoint after = service.use(userId, amount);
+                assertThat(after.point()).isEqualTo(100 - amount);
+
+                // 히스토리: CHARGE, USE 순서
+                assertThat(service.getHistories(userId))
+                        .extracting(PointHistory::type)
+                        .containsExactly(TransactionType.CHARGE, TransactionType.USE);
+            } else {
+                assertThatThrownBy(() -> service.use(userId, amount))
+                        .isInstanceOf(ApiException.class)
+                        .satisfies(ex -> {
+                            ApiException ae = (ApiException) ex;
+                            if ("INVALID_AMOUNT".equals(expected)) {
+                                assertThat(ae.errorCode()).isEqualTo(ErrorCode.INVALID_AMOUNT);
+                            } else if ("INSUFFICIENT_BALANCE".equals(expected)) {
+                                assertThat(ae.errorCode()).isEqualTo(ErrorCode.INSUFFICIENT_BALANCE);
+                            }
+                        });
+
+                // 실패 후 상태 불변(잔액/히스토리)
+                assertThat(service.getPoint(userId).point()).isEqualTo(100);
+                assertThat(service.getHistories(userId))
+                        .extracting(PointHistory::type)
+                        .containsExactly(TransactionType.CHARGE);
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("경계값 분석: charge (하한 -1, 0, 1)")
+    class ChargeBoundaryCases {
+
+        @ParameterizedTest(name = "charge 금액={0} → INVALID_AMOUNT")
+        @ValueSource(longs = {-1, 0})
+        void charge_invalid_amounts(long invalidAmount) {
+            long userId = 21L;
+
+            assertThatThrownBy(() -> service.charge(userId, invalidAmount))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(ex -> {
+                        ApiException ae = (ApiException) ex;
+                        assertThat(ae.errorCode()).isEqualTo(ErrorCode.INVALID_AMOUNT);
+                    });
+
+            // 상태 불변
+            assertThat(service.getPoint(userId).point()).isZero();
+            assertThat(service.getHistories(userId)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("charge: 최소 유효값 1은 성공")
+        void charge_min_valid_amount_success() {
+            long userId = 22L;
+
+            UserPoint after = service.charge(userId, 1);
+            assertThat(after.point()).isEqualTo(1);
+
+            assertThat(service.getHistories(userId))
+                    .extracting(PointHistory::type, PointHistory::amount)
+                    .containsExactly(Tuple.tuple(TransactionType.CHARGE, 1L));
+        }
+    }
 
 }
+
